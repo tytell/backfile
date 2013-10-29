@@ -485,7 +485,7 @@ class RootTree(DirTree):
 
 def main():
     ftree = RootTree()
-    ftree.from_path('/Users/eric/Eclipse/annex2/tests/testA')
+    ftree.from_path('C:\Code')
     
     needshash = [node for (name, node) in ftree.iternodes() if node.isfile and node.hashval is None]
     update_hashes(needshash)
