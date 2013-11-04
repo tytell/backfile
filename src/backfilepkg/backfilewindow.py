@@ -6,9 +6,9 @@ Created on Tue Oct 29 11:47:08 2013
 """
 
 import sys
-from PyQt4 import QtGui, QtCore
+from PySide import QtGui
 
-class BackfileWindow(QtGui.QDialog):
+class BackfileWindow(QtGui.QMainWindow):
     '''
     Base window for the Backfile program
     '''
@@ -19,20 +19,24 @@ class BackfileWindow(QtGui.QDialog):
         self.initUI()
         
     def initUI(self):
-        self.datafileEdit = QtGui.QLineEdit()
-        choosefileButton = QtGui.QPushButton("Browse")
-        
-        doneButton = QtGui.QPushButton("Done")
+        textEdit = QtGui.QTextEdit()
+        self.setCentralWidget(textEdit)
 
-        grid = QtGui.QGridLayout()
-        grid.addWidget(self.datafileEdit,0,0)
-        grid.addWidget(choosefileButton,0,1)
-        grid.addWidget(doneButton,1,1, alignment=QtCore.Qt.AlignRight)
-
-        doneButton.clicked.connect(self.done)
-        choosefileButton.clicked.connect(self.choosefile_clicked)
+        self.statusBar().showMessage('Ready')
         
-        self.setLayout(grid)
+        exitAction = QtGui.QAction(QtGui.QIcon.fromTheme("application-exit"), '&Exit', self)
+        exitAction.setShortcut('Ctrl+Q')
+        exitAction.setStatusTip('Exit application')
+        exitAction.triggered.connect(self.close)
+
+        self.statusBar()
+
+        menubar = QtGui.QMenuBar()
+        fileMenu = menubar.addMenu('&File')
+        fileMenu.addAction(exitAction)
+                        
+        toolbar = self.addToolBar('Exit')
+        toolbar.addAction(exitAction)
         
         self.setGeometry(300, 300, 300, 150)
         self.setWindowTitle('Backfile')    
@@ -46,7 +50,8 @@ def main():
     app = QtGui.QApplication(sys.argv)
     wnd = BackfileWindow()
     wnd.show()
-    app.exec_()
+    wnd.activateWindow()
+    sys.exit(app.exec_())
     
 
     
