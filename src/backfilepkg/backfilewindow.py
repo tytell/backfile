@@ -15,37 +15,68 @@ class BackfileWindow(QtGui.QMainWindow):
     
     def __init__(self):
         super(BackfileWindow, self).__init__()
-        
-        self.initUI()
-        
-    def initUI(self):
+            
         textEdit = QtGui.QTextEdit()
         self.setCentralWidget(textEdit)
 
         self.statusBar().showMessage('Ready')
         
-        exitAction = QtGui.QAction(QtGui.QIcon.fromTheme("application-exit"), '&Exit', self)
-        exitAction.setShortcut('Ctrl+Q')
-        exitAction.setStatusTip('Exit application')
-        exitAction.triggered.connect(self.close)
-
-        self.statusBar()
-
-        menubar = QtGui.QMenuBar()
-        fileMenu = menubar.addMenu('&File')
-        fileMenu.addAction(exitAction)
-                        
-        toolbar = self.addToolBar('Exit')
-        toolbar.addAction(exitAction)
+        self.createActions()
+        self.createMenus()
         
+        toolbar = self.addToolBar('Main')
+        toolbar.addAction(self.addScanAct)
+               
         self.setGeometry(300, 300, 300, 150)
         self.setWindowTitle('Backfile')    
-        
-    def choosefile_clicked(self):
-        fname = QtGui.QFileDialog.getOpenFileName(self, 'Choose data file', 
-                '/home')
-        self.datafileEdit.setText(fname)
 
+    def newCatalog(self):
+        fname = QtGui.QFileDialog.getSaveFileName(self, 'Choose datafile',
+                                                  filter=self.tr("Catalog files (*.h5)"))        
+        self.catalogName = fname;
+        
+    def openCatalog(self):
+        fname = QtGui.QFileDialog.getOpenFileName(self, 'Choose datafile',
+                                                  '/home')        
+        self.catalogName = fname;
+
+    def addScan(self):
+        self.statusBar().showMessage('Add scan')
+
+    def aboutBackfile(self):
+        self.statusBar().showMessage('About')
+        
+    def createActions(self):
+        self.newAct = QtGui.QAction("&New catalog...", self,
+                shortcut=QtGui.QKeySequence.New,
+                statusTip="Create a new catalog", triggered=self.newCatalog)
+        
+        self.openAct = QtGui.QAction("&Open catalog...", self,
+                shortcut=QtGui.QKeySequence.Open,
+                statusTip="Open an existng catalog", triggered=self.openCatalog)
+        
+        self.addScanAct = QtGui.QAction("&Add scan directory...", self,
+                statusTip="Create a new catalog", triggered=self.addScan)
+        
+        self.exitAct = QtGui.QAction("&Quit", self, shortcut=QtGui.QKeySequence.Quit,
+                statusTip="Quit the application", triggered=self.close)
+
+        self.aboutAct = QtGui.QAction("About &Backfile", self,
+                statusTip="Show the Backfile About box",
+                triggered=self.aboutBackfile)
+
+    def createMenus(self):
+        self.fileMenu = self.menuBar().addMenu("&File")
+        self.fileMenu.addAction(self.newAct)
+        self.fileMenu.addAction(self.openAct)
+        self.fileMenu.addSeparator()
+        self.fileMenu.addAction(self.addScanAct)
+        self.fileMenu.addSeparator()
+        self.fileMenu.addAction(self.exitAct)
+        
+        self.helpMenu = self.menuBar().addMenu("&Help")
+        self.helpMenu.addAction(self.aboutAct)
+        
 def main():
     app = QtGui.QApplication(sys.argv)
     wnd = BackfileWindow()
