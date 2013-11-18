@@ -44,6 +44,7 @@ class Node(object):
 
     name = None
     parent = None
+    root = None
     children = dict()
     
     @property    
@@ -56,7 +57,7 @@ class Node(object):
 
     @property
     def isroot(self):
-        return self.parent is None
+        return self.root is self
     
     def abspath(self):
         if self.name:
@@ -88,6 +89,8 @@ class Node(object):
         self.children = dict()
         self.isdir = True
         self.isfile = False
+        if parent is not None:
+            self.root = parent.root
                     
     def __str__(self):
         return self.abspath()
@@ -136,11 +139,8 @@ class Node(object):
         return False
         
     def getroot(self):
-        par = self
-        while par.parent is not None:
-            par = par.parent
-        return par
-    
+        return self.root
+            
     def isorder(self, isord):
         '''
         Check to see if our order = isord. 
@@ -201,7 +201,7 @@ class Node(object):
         '''Walk through the hierarchy and return nodes.
         Similar to os.walk'''
         nodes = [self]
-        root = self
+        top = self
         curnode = self
         while nodes:
             files = []
@@ -212,18 +212,27 @@ class Node(object):
                 else:
                     files.append(node)
                 
-            yield((root, dirs, files))
+            yield((top, dirs, files))
             
             nodes += dirs
             curnode = nodes.pop()
-            root = curnode
+            top = curnode
     
     def to_hdf5(self, h5gp):
         '''Save the tree structure to an HDF5 group'''
-        gp1 = h5gp.create_group(self.name)
+        gp1 = h5gp.require_group(self.name)
+        infile = set(gp1.keys())
         if self.children:
             for node in self.children.values():
                 node.to_hdf5(gp1)
+            
+            deleted = infile.difference(self.children.keys())
+        else:
+            deleted = infile
+        
+        deleted = [(os.path.join(self.abspath(),name), gp1[name]) for name in deleted]
+        self.getroot().handle_deleted(deleted)
+            
 
 class FileNode(Node):
     size = 0
@@ -241,6 +250,7 @@ class FileNode(Node):
         self.hashval = hashval
         
         self.children = None
+        self.root = parent.root
     
     def __eq__(self, other):
         if isinstance(other, FileNode):
@@ -284,8 +294,8 @@ class FileNode(Node):
         self.hashval = other.hashval
                     
     def to_hdf5(self, h5gp): 
-        '''Save the file info to an HDF5 group'''
-        gp1 = h5gp.create_group(self.name)
+        '''Save the file info to an HDF5 group'''            
+        gp1 = h5gp.require_group(self.name)
         gp1.attrs["Size"] = self.size
         if self.modified is not None:
             gp1.attrs["Modified"] = np.array(self.modified, dtype='int32')
@@ -300,7 +310,32 @@ class FileNode(Node):
             gp1.attrs["IsLink"] = False
         
         if self.hashval is not None:
-            gp1["Hash"] = self.hashval
+            if 'Hash' in gp1:
+                hset = gp1['Hash']
+                dateset = gp1['HashDate']
+                
+                (ds,n) = hset.shape
+                assert(n > 0)
+                
+                lasthash = hset[:,n-1]
+                
+                if np.any(lasthash != self.hashval):
+                    hset.resize((ds,n+1))
+                    dateset.resize((9,n+1))
+                    ind = n
+                else:
+                    ind = n-1
+            else:
+                hset = gp1.create_dataset('Hash',(HASH_FUNCTION().digest_size,1),
+                                       maxshape=(HASH_FUNCTION().digest_size,None),
+                                       dtype='uint8')
+                dateset = gp1.create_dataset('HashDate',(9,1),
+                                       maxshape=(9,None),
+                                       dtype='int16')
+                ind = 0
+                
+            hset[:,ind] = self.hashval
+            dateset[:,ind] = np.array(time.localtime(), dtype='int16')
         
     def from_hdf5(self, h5gp):
         self.size = h5gp.attrs['Size']
@@ -311,7 +346,7 @@ class FileNode(Node):
         
         if "Hash" in h5gp:
             self.hashval = np.zeros(HASH_FUNCTION().digest_size, dtype='uint8')
-            h5gp["Hash"].read_direct(self.hashval)
+            self.hashval = h5gp["Hash"][:,-1]
         else:
             self.hashval = None
         
@@ -320,6 +355,8 @@ class DirTree(Node):
         self.name = name
         self.parent = parent
         self.id = None
+        if parent is not None:
+            self.root = parent.root
         self.children = dict()
                     
     def __eq__(self, other):
@@ -387,10 +424,17 @@ class DirTree(Node):
         '''
         
         needshash = []
+        #this will be a set of items that were deleted.
+        #start with all items
+        deleted = set(self.children.keys())
+        
         for item in os.listdir(path):
             if item in exclude:
                 continue
             
+            #remove items that we find
+            deleted.discard(item)
+                
             pathname = os.path.join(path, item)
             if os.path.isdir(pathname):
                 if (item in self.children) and self.children[item].isdir:
@@ -411,7 +455,10 @@ class DirTree(Node):
                 if (item not in self.children) or (ondisk != self.children[item]):
                     self.children[item] = ondisk
                     needshash.append(ondisk)
-        
+
+        for item in deleted:
+            del self.children[item]
+            
         return needshash
                 
         
@@ -436,6 +483,7 @@ class RootTree(DirTree):
     def __init__(self, name=None, ident=None):
         self.name = name
         self.parent = None
+        self.root = self
         self.id = ident
         self.children = dict()
 
@@ -449,17 +497,31 @@ class RootTree(DirTree):
         
         self.id = h.hexdigest()
         
+    def get_hdf5_hash_name(self):
+        return '/' + self.id + '/Hashes'
+        
     def to_hdf5(self, h5gp):
         '''Save the tree structure to an HDF5 group'''
         
         assert(self.id is not None)
         
-        gp1 = h5gp.create_group(self.id)
-        gp1.attrs['RootPath'] = self.name
+        if self.id in h5gp:
+            gp1 = h5gp[self.id]
+        else:
+            gp1 = h5gp.create_group(self.id)
+            
+        dirgp = gp1.require_group('Tree')
+        self.deletedgp = gp1.require_group('Deleted')
+        
+        if 'RootPath' in gp1.attrs:
+            assert(gp1.attrs['RootPath'] == self.name)
+        else:
+            gp1.attrs['RootPath'] = self.name
         
         if self.children:
             for node in self.children.values():
-                node.to_hdf5(gp1)
+                node.to_hdf5(dirgp)
+        self.deletedgp = None
 
     def from_hdf5(self, h5gp):
         '''
@@ -467,11 +529,15 @@ class RootTree(DirTree):
         '''
         
         #make sure we're asking for a root group
-        assert('RootPath' in h5gp.attrs)
-        self.name = h5gp.attrs['RootPath']
-        self.id = h5gp.name
+        assert(self.id is not None)
+                
+        rootgp = h5gp[self.id]
         
-        super(RootTree, self).from_hdf5(h5gp)
+        assert('RootPath' in rootgp.attrs)
+        self.name = rootgp.attrs['RootPath']
+        
+        dirgp = rootgp['Tree']
+        super(RootTree, self).from_hdf5(dirgp)
 
     def from_path(self, path, dohash=False, exclude=['.annex']):
         '''
@@ -483,9 +549,30 @@ class RootTree(DirTree):
             self.make_id()
         super(RootTree, self).from_path(path,dohash,exclude)
 
+    def handle_deleted(self, deleted):
+        for (name,h5ref) in deleted:
+            if 'Hash' in h5ref:
+                hashval1 = np.zeros(HASH_FUNCTION().digest_size, dtype='uint8')
+                hashval1 = h5ref["Hash"][:,-1]
+                
+                hashtxt1 = ''.join("%02X" % n for n in hashval1)
+                
+                hashgp1 = self.deletedgp.require_group(hashtxt1)
+                if hashgp1.keys():
+                    nm = str(int(hashgp1.keys()[-1])+1)
+                else:
+                    nm = '1'
+                    
+                hashgp1.file.copy(h5ref, hashgp1, name=nm)
+                hashgp1[nm].attrs['OriginalPath'] = h5ref.name
+                
+                del hashgp1.file[h5ref.name]
+                
+                
+            
 def main():
     ftree = RootTree()
-    ftree.from_path('C:\Code')
+    ftree.from_path('/Users/etytel01/bin')
     
     needshash = [node for (name, node) in ftree.iternodes() if node.isfile and node.hashval is None]
     update_hashes(needshash)
@@ -504,8 +591,8 @@ def main():
     f2 = h5py.File('test.h5', 'r')
     k = f2.keys()
     
-    ftree2 = RootTree()
-    ftree2.from_hdf5(f2[k[0]])
+    ftree2 = RootTree(ident=ftree.id)
+    ftree2.from_hdf5(f2)
 
     for (name, node) in ftree2.iternodes():
         indent = '   ' * node.depth()

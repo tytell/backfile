@@ -8,14 +8,15 @@ import os, sys, time, shutil
 import random
 import hashlib
 import subprocess
+import h5py
 
-from filetree import DirTree, RootTree, FileNode, get_file_hash
+from filetree import DirTree, RootTree, FileNode, get_file_hash, update_hashes
 
 BUF_SIZE = 8192
 
 def build_test_directory(pathname, depth, filesperdir, minfiles=0, dirsperdir=1, filesizes=10*1024, randomize=True):
     if not os.path.exists(pathname):
-        os.mkdir(pathname)
+        os.makedirs(pathname)
     
     ftree = RootTree(name=pathname)
     build_subdirectories(pathname, depth, filesperdir, minfiles, dirsperdir, filesizes, randomize, ftree)
@@ -161,7 +162,7 @@ def check_tree(ftree):
         print "All clean"
         
 def main():
-    testdir = '/Users/eric/Eclipse/annex2/tests/testdir1'
+    testdir = '/Users/etytel01/Documents/Scanner/backfile/test/testdir1'
     if os.path.exists(testdir):
         shutil.rmtree(testdir)
     ftree0 = build_test_directory(testdir, depth=3, filesperdir=3, minfiles=2, dirsperdir=1,
@@ -170,11 +171,25 @@ def main():
     ftree1 = RootTree()
     ftree1.from_path(testdir, dohash=True)
     
+    f = h5py.File('test1.h5', 'w')
+    ftree1.to_hdf5(f)
+    shutil.copy('test1.h5','test1-init.h5')
+    
     modify_dir(ftree1, 3,3,3)
     
     check_tree(ftree1)
     
+    needshash = ftree1.update_from_path(testdir)
+    update_hashes(needshash)
     
+    check_tree(ftree1)
+    ftree1.to_hdf5(f)
+    
+    ftree2 = RootTree(ident=ftree1.id)
+    ftree2.from_hdf5(f)
+    check_tree(ftree2)
+    
+    f.close()
     
 if __name__ == '__main__':
     sys.exit(main())            
