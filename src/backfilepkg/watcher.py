@@ -26,7 +26,17 @@ class FileTreeWatcher(FileSystemEventHandler):
     def on_created(self, event):
         print event.src_path, event.event_type  # print now only for degug
         
-        self.tree.add(event.src_path, isdir=event.is_directory, dohash=False)
+        self.tree.update_item(event.src_path, isdir=event.is_directory, dohash=False)
+                    
+    def on_modified(self, event):
+        print event.src_path, event.event_type  # print now only for degug
+        
+        self.tree.update_item(event.src_path, isdir=event.is_directory, dohash=False)
+                    
+    def on_deleted(self, event):
+        print event.src_path, event.event_type  # print now only for degug
+        
+        self.tree.delete_item(event.src_path)
                     
                 
 def main():
@@ -39,10 +49,10 @@ def main():
     ftree1 = RootTree()
     ftree1.from_path(testdir, dohash=True)
     
-    #watcher = FileTreeWatcher(ftree1)
-    #observer = Observer()
-    #observer.schedule(watcher, path=ftree1.abspath(), recursive=True)
-    #observer.start()
+    watcher = FileTreeWatcher(ftree1)
+    observer = Observer()
+    observer.schedule(watcher, path=ftree1.abspath(), recursive=True)
+    observer.start()
     
     f = h5py.File('testwatch.h5', 'w')
     ftree1.to_hdf5(f)
@@ -50,20 +60,25 @@ def main():
     
     (modnames, delnames, addnames) = modify_dir(ftree1, 3,3,3)
     
-    needshash = []
-    for name in modnames + addnames:
-        needshash += ftree1.update(name, isdir=False, dohash=False)
-    update_hashes(needshash)
+    #needshash = []
+    #for name in modnames + addnames:
+    #    needshash += ftree1.update_item(name, isdir=False, dohash=False)
+    #for name in delnames:
+    #    ftree1.delete_item(name)
+        
+    #update_hashes(needshash)
     
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        observer.stop()
+        
+    observer.join()
+
     check_tree(ftree1)
     
-#    try:
-#        while True:
-#            time.sleep(1)
-#    except KeyboardInterrupt:
-#        watcher.stop()
-#        
-#    watcher.join()    
+
     
 if __name__ == '__main__':
     sys.exit(main())            

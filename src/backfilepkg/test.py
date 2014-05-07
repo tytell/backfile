@@ -24,23 +24,20 @@ def build_test_directory(pathname, depth, filesperdir, minfiles=0, dirsperdir=1,
     return ftree
     
 def fill_file(fid, size, hashfcn=None):
-    if hashfcn:
-        h = hashfcn
-    else:
-        h = hashlib.sha256()
-
     sz = 0
     while sz < size:
         buf = bytearray([random.randint(0,255) for j in xrange(BUF_SIZE)])
         if size-sz < BUF_SIZE:
             fid.write(buf[:size-sz])
-            h.update(buf[:size-sz])
+            if hashfcn:
+                hashfcn.update(buf[:size-sz])
         else:
             fid.write(buf)
-            h.update(buf)
+            if hashfcn:
+                hashfcn.update(buf)
         sz += BUF_SIZE
     
-    return h
+    return hashfcn
 
 def build_subdirectories(pathname, depth, filesperdir, minfiles, dirsperdir, filesizes, randomize, ftree):
     if randomize:
@@ -62,7 +59,7 @@ def build_subdirectories(pathname, depth, filesperdir, minfiles, dirsperdir, fil
     for (i,sz) in enumerate(sizes):
         name = '{0}{1:02d}'.format(dirname, i+1)
         with open(os.path.join(pathname, name), 'wb') as fid:
-            h = fill_file(fid, sz)
+            h = fill_file(fid, sz, hashfcn=hashlib.sha256())
 
         fnode = FileNode(name=name, parent=ftree, size=sz, modified=time.localtime(), hashval=h.hexdigest())
         ftree.children[name] = fnode
@@ -78,9 +75,14 @@ def build_subdirectories(pathname, depth, filesperdir, minfiles, dirsperdir, fil
         build_subdirectories(fullname, depth-1, filesperdir, minfiles, dirsperdir, filesizes, randomize, subdir)
         ftree.children[name] = subdir
 
-def modify_files(nodes, appendlen):
+def modify_files(nodes, appendlen, dohash=False, quiet=False):
     for node in nodes:
-        h = get_file_hash(node.abspath())
+        if dohash:
+            h = get_file_hash(node.abspath())
+        else:
+            h = None
+        if ~quiet:
+            print "    {0}".format(node.name)
         with open(node.abspath(), 'ab') as fid:
             h = fill_file(fid, appendlen, hashfcn=h)
 
@@ -88,26 +90,33 @@ def modify_dir(ftree, nmod, nadd, ndel, appendlen=50*1024):
     filenodes = [node for (name,node) in ftree.iternodes() if node.isfile]
     dirnodes = [node for (name,node) in ftree.iternodes() if node.isdir]
     
+    print "Modifying..."
     modnodes = random.sample(filenodes, nmod+ndel)
     delnodes = modnodes[nmod:]
     modnodes = modnodes[:nmod]
     modify_files(modnodes, appendlen)
     
+    print "Deleting..."
     for delnode in delnodes:
         os.unlink(delnode.abspath())
+        print "    {0}".format(delnode.name)
     
     #random selection of dirs, potentially repeating
+    print "Adding..."
     adddirs = [random.choice(dirnodes) for i in xrange(nadd)]
     addnames = []
     for (ind, dirnode) in enumerate(adddirs):
         nm = "add{0}".format(ind)
         addname = os.path.join(dirnode.abspath(), nm)
+        print "    {0}".format(addname)
         with open(addname, 'ab') as fid:
             fill_file(fid, appendlen)
         addnames.append(addname)
     
     modnames = [node.abspath() for node in modnodes]
     delnames = [node.abspath() for node in delnodes]
+    
+    print "Done."
     
     return (modnames, delnames, addnames)
     

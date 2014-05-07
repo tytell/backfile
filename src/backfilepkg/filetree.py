@@ -247,7 +247,7 @@ class Node(object):
             deleted = infile
         
         deleted = [(os.path.join(self.abspath(),name), gp1[name]) for name in deleted]
-        self.getroot().handle_deleted(deleted)
+        self.getroot().deleted_to_hdf5(deleted)
             
 
 class FileNode(Node):
@@ -283,7 +283,10 @@ class FileNode(Node):
         return not self.__eq__(other)
                 
     def __str__(self):
-        hd = ''.join("%02X" % n for n in self.hashval)
+        if self.hashval:
+            hd = ''.join("%02X" % n for n in self.hashval)
+        else:
+            hd = 'None'
         return '{0}: hash = {1}'.format(self.abspath(), hd)
 
     def hexdigest(self):
@@ -452,40 +455,39 @@ class DirTree(Node):
         #start with all items
         deleted = set(self.children.keys())
         
-        for item in os.listdir(path):
-            if item in exclude:
+        for name in os.listdir(path):
+            if name in exclude:
                 continue 
             
-            #remove items that we find
-            deleted.discard(item)
+            #remove names that we find
+            deleted.discard(name)
                 
-            pathname = os.path.join(path, item)
+            pathname = os.path.join(path, name)
             if os.path.isdir(pathname):
-                if (item in self.children) and self.children[item].isdir:
-                    needshash += self.children[item].update_from_path(pathname, exclude)
+                if (name in self.children) and self.children[name].isdir:
+                    needshash += self.children[name].update_from_path(pathname, exclude)
                 else:
-                    subdir = DirTree(name=item, parent=self)
+                    subdir = DirTree(name=name, parent=self)
                     subdir.from_path(pathname, False)                    
-                    self.children[item] = subdir
+                    self.children[name] = subdir
                     needshash += subdir.get_needs_hash()
             elif os.path.islink(pathname):
-                sub = FileNode(name=item, parent=self, islink=True)
+                sub = FileNode(name=name, parent=self, islink=True)
                 sub.linktarget = os.path.realpath(pathname)
-                self.children[item] = sub
+                self.children[name] = sub
             else:
-                ondisk = FileNode(name=item, parent=self)
+                ondisk = FileNode(name=name, parent=self)
                 ondisk.from_file(pathname, dohash=False)
                 
-                if (item not in self.children) or (ondisk != self.children[item]):
-                    self.children[item] = ondisk
+                if (name not in self.children) or (ondisk != self.children[name]):
+                    self.children[name] = ondisk
                     needshash.append(ondisk)
 
-        for item in deleted:
-            del self.children[item]
+        for name in deleted:
+            del self.children[name]
             
         return needshash
-                
-        
+                        
     def from_hdf5(self, h5gp):
         for item in h5gp:
             subgp = h5gp[item]
@@ -600,45 +602,30 @@ class RootTree(DirTree):
                 parent.children[upname] = sub
                 needshash = [sub]
         else:
-            if ~isdir:
-                sub = parent[upname]
+            if not isdir:
+                sub = parent.children[upname]
                 sub.from_file(fullpath, dohash=dohash)
                 needshash = [sub]
+            else:
+                #modified directory is sort of meaningless
+                needshash = []
         return needshash
                 
-    def delete_item(self, fullpath, isdir=False, dohash=False):
+    def delete_item(self, fullpath):
         '''
         Deletes an item somewhere in the tree.
         '''
-        
         pathname = os.path.relpath(fullpath, self.name)
         (parentname,upname) = os.path.split(pathname)
-        
         if parentname:
-            assert(parentname in self)        
+            assert(parentname in self)
             parent = self[parentname]
         else:
             parent = self
-        
-        if upname not in parent:        
-            if isdir:
-                subdir = DirTree(name=upname, parent=parent)
-                subdir.from_path(fullpath, dohash)
-                parent.children[upname] = subdir
-                needshash = [node for node in subdir.iternodes()]
-            else:
-                sub = FileNode(name=upname, parent=parent)
-                sub.from_file(fullpath, dohash)
-                parent.children[upname] = sub
-                needshash = [sub]
-        else:
-            if ~isdir:
-                sub = parent[upname]
-                sub.from_file(fullpath, dohash=dohash)
-                needshash = [sub]
-        return needshash
+            
+        del parent.children[upname]        
 
-    def handle_deleted(self, deleted):
+    def deleted_to_hdf5(self, deleted):
         for (name,h5ref) in deleted:
             if 'Hash' in h5ref:
                 hashval1 = np.zeros(HASH_FUNCTION().digest_size, dtype='uint8')
