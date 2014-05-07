@@ -55,6 +55,24 @@ class ProgressCLI(ProgressNone):
     iscursor = False
     
     def __init__(self, **kw):
+        self.set(**kw)
+
+        if self.total > 0:
+            self.meter_ticks = int(kw.get('ticks', 60))
+            self.meter_division = float(self.total) / self.meter_ticks
+            self.meter_value = int(self.count / self.meter_division)
+        self.abort = False
+        self.last_update = None
+        self.rate_history_idx = 0
+        self.rate_history_len = 10
+        self.rate_history = [None] * self.rate_history_len
+        self.rate_current = 0.0
+        self.last_refresh = 0
+        self._cursor = False
+        if (self.iscursor):
+            self.reset_cursor()
+        
+    def set(self, **kw):
         # What time do we start tracking our progress from?
         self.timestamp = kw.get('timestamp', time.time())
         # What kind of unit are we tracking?
@@ -70,16 +88,6 @@ class ProgressCLI(ProgressNone):
             self.meter_ticks = int(kw.get('ticks', 60))
             self.meter_division = float(self.total) / self.meter_ticks
             self.meter_value = int(self.count / self.meter_division)
-        self.abort = False
-        self.last_update = None
-        self.rate_history_idx = 0
-        self.rate_history_len = 10
-        self.rate_history = [None] * self.rate_history_len
-        self.rate_current = 0.0
-        self.last_refresh = 0
-        self._cursor = False
-        if (self.iscursor):
-            self.reset_cursor()
 
     def __enter__(self):
         self.last_update = None

@@ -89,17 +89,29 @@ def modify_dir(ftree, nmod, nadd, ndel, appendlen=50*1024):
     dirnodes = [node for (name,node) in ftree.iternodes() if node.isdir]
     
     modnodes = random.sample(filenodes, nmod+ndel)
-    modify_files(modnodes[:nmod], appendlen)
+    delnodes = modnodes[nmod:]
+    modnodes = modnodes[:nmod]
+    modify_files(modnodes, appendlen)
     
-    for delnode in modnodes[nmod:]:
+    for delnode in delnodes:
         os.unlink(delnode.abspath())
     
     #random selection of dirs, potentially repeating
     adddirs = [random.choice(dirnodes) for i in xrange(nadd)]
+    addnames = []
     for (ind, dirnode) in enumerate(adddirs):
         nm = "add{0}".format(ind)
-        with open(os.path.join(dirnode.abspath(), nm), 'ab') as fid:
+        addname = os.path.join(dirnode.abspath(), nm)
+        with open(addname, 'ab') as fid:
             fill_file(fid, appendlen)
+        addnames.append(addname)
+    
+    modnames = [node.abspath() for node in modnodes]
+    delnames = [node.abspath() for node in delnodes]
+    
+    return (modnames, delnames, addnames)
+    
+    
             
     
     

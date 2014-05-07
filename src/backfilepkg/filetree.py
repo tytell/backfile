@@ -11,6 +11,7 @@ import h5py
 import numpy as np
 
 from progress import ProgressCLI
+from thumbnail import get_thumbnail
 
 TIME_FORMAT = '%Y-%m-%d %H:%M:%S %Z'
 HASH_FUNCTION = hashlib.sha256
@@ -36,6 +37,21 @@ def update_hashes(nodes):
         for node in nodes:
             h = get_file_hash(node.abspath(), prog)
             node.hashval = np.frombuffer(h.digest(), dtype=np.uint8, count=h.digest_size)
+            
+def update_thumbnails(nodes, progress=None):
+    totalsize = sum([node.size for node in nodes])
+    
+    if progress:
+        progress.set(total=totalsize)
+        
+    for node in nodes:
+        nm = node.abspath()
+        node.thumbnail = get_thumbnail(path=nm)
+        if node.thumbnail:
+            node.thumbnail.from_file()
+        if progress:
+            progress.update(node.size, info=nm)
+            
 
 class Node(object):
     '''
@@ -239,7 +255,8 @@ class FileNode(Node):
     modified = None
     hashval = None
     islink = False
-
+    thumbnail = None
+    
     def __init__(self, name, parent, size=0, modified=None, hashval=None, islink=False):
         self.name = name
         self.parent = parent
@@ -248,6 +265,7 @@ class FileNode(Node):
         self.islink = islink
         self.linktarget = None
         self.hashval = hashval
+        self.thumbnail = None
         
         self.children = None
         self.root = parent.root
@@ -292,6 +310,7 @@ class FileNode(Node):
         self.islink = other.islink
         self.linktarget = other.linktarget
         self.hashval = other.hashval
+        self.thumbnail = other.thumbnail
                     
     def to_hdf5(self, h5gp): 
         '''Save the file info to an HDF5 group'''            
@@ -336,6 +355,9 @@ class FileNode(Node):
                 
             hset[:,ind] = self.hashval
             dateset[:,ind] = np.array(time.localtime(), dtype='int16')
+            
+        if self.thumbnail is not None:
+            self.thumbnail.to_hdf5(gp1)
         
     def from_hdf5(self, h5gp):
         self.size = h5gp.attrs['Size']
@@ -349,6 +371,8 @@ class FileNode(Node):
             self.hashval = h5gp["Hash"][:,-1]
         else:
             self.hashval = None
+        
+        self.thumbnail = get_thumbnail(h5obj=h5gp)
         
 class DirTree(Node):
     def __init__(self, name=None, parent=None):
@@ -430,7 +454,7 @@ class DirTree(Node):
         
         for item in os.listdir(path):
             if item in exclude:
-                continue
+                continue 
             
             #remove items that we find
             deleted.discard(item)
@@ -549,6 +573,71 @@ class RootTree(DirTree):
             self.make_id()
         super(RootTree, self).from_path(path,dohash,exclude)
 
+    def update_item(self, fullpath, isdir=False, dohash=False):
+        '''
+        Updates an item somewhere in the tree.
+        Returns nodes that need hashes.
+        '''
+        
+        pathname = os.path.relpath(fullpath, self.name)
+        (parentname,upname) = os.path.split(pathname)
+        
+        if parentname:
+            assert(parentname in self)        
+            parent = self[parentname]
+        else:
+            parent = self
+        
+        if upname not in parent:        
+            if isdir:
+                subdir = DirTree(name=upname, parent=parent)
+                subdir.from_path(fullpath, dohash)
+                parent.children[upname] = subdir
+                needshash = [node for node in subdir.iternodes()]
+            else:
+                sub = FileNode(name=upname, parent=parent)
+                sub.from_file(fullpath, dohash)
+                parent.children[upname] = sub
+                needshash = [sub]
+        else:
+            if ~isdir:
+                sub = parent[upname]
+                sub.from_file(fullpath, dohash=dohash)
+                needshash = [sub]
+        return needshash
+                
+    def delete_item(self, fullpath, isdir=False, dohash=False):
+        '''
+        Deletes an item somewhere in the tree.
+        '''
+        
+        pathname = os.path.relpath(fullpath, self.name)
+        (parentname,upname) = os.path.split(pathname)
+        
+        if parentname:
+            assert(parentname in self)        
+            parent = self[parentname]
+        else:
+            parent = self
+        
+        if upname not in parent:        
+            if isdir:
+                subdir = DirTree(name=upname, parent=parent)
+                subdir.from_path(fullpath, dohash)
+                parent.children[upname] = subdir
+                needshash = [node for node in subdir.iternodes()]
+            else:
+                sub = FileNode(name=upname, parent=parent)
+                sub.from_file(fullpath, dohash)
+                parent.children[upname] = sub
+                needshash = [sub]
+        else:
+            if ~isdir:
+                sub = parent[upname]
+                sub.from_file(fullpath, dohash=dohash)
+                needshash = [sub]
+        return needshash
+
     def handle_deleted(self, deleted):
         for (name,h5ref) in deleted:
             if 'Hash' in h5ref:
@@ -571,6 +660,18 @@ class RootTree(DirTree):
                 
             
 def main():
+    ftree = RootTree()
+    ftree.from_path('/Users/etytel01/Documents/Scanner/backfile/test/testthumbs')
+    
+    needshash = [node for (name, node) in ftree.iternodes() if node.isfile and node.hashval is None]
+    update_hashes(needshash)
+    needsthumb = [node for (name, node) in ftree.iternodes() if node.isfile and node.thumbnail is None]
+    update_thumbnails(needsthumb, progress=ProgressCLI())
+
+    f = h5py.File('thumbs.h5', 'w')
+    ftree.to_hdf5(f)
+    f.close()    
+
     ftree = RootTree()
     ftree.from_path('/Users/etytel01/bin')
     
