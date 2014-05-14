@@ -8,18 +8,26 @@ Created on Thu May  8 09:57:49 2014
 import os, time, shutil
 import sys
 import h5py
-import multiprocessing
+import multiprocessing as mp
 import numpy as np
 import hashlib
+from functools import partial
+import logging
 
 from filetree import RootTree
 from progress import ProgressCLI
 from test import build_test_directory, modify_dir
 
+import filedataglobal
+
 TIME_FORMAT = '%Y-%m-%d %H:%M:%S %Z'
 HASH_FUNCTION = hashlib.sha256
 BLOCK_SIZE = 128 * HASH_FUNCTION().block_size
+POOL_SIZE = 4
 
+def init_pool(status):
+    filedataglobal.status = status
+    
 class FileData(object):
     '''
     Data on a file
@@ -54,10 +62,14 @@ class FileData(object):
 
     def __eq__(self, other):
         if isinstance(other, FileData):
-            if self.hashval is not None and other.hashval is not None:
-                return all(self.hashval == other.hashval)
+            if self.isdir or self.islink:
+                return (other.isdir == self.isdir) and (other.islink == self.islink) and \
+                    (other.name == self.name)
             else:
-                return (self.size == other.size) and (self.modified == other.modified)
+                if self.hashval is not None and other.hashval is not None:
+                    return all(self.hashval == other.hashval)
+                else:
+                    return (self.size == other.size) and (self.modified == other.modified)            
         else:
             return False
     
@@ -67,8 +79,13 @@ class FileData(object):
     def from_path(self):
         if os.path.isdir(self.fullpath):
             self.isdir = True
+            self.islink = False
+        elif os.path.islink(self.fullpath):
+            self.isdir = False
+            self.islink = True
         else:
             self.isdir = False
+            self.islink = False
             self.size = os.path.getsize(self.fullpath)
             self.modified = time.localtime(os.path.getmtime(self.fullpath))
 
@@ -90,19 +107,71 @@ class FileData(object):
                 self.hashval = h5gp["Hash"][:,-1]
             else:
                 self.hashval = None
+
+class FileDataStatus(object):
+    '''
+    Shared object for status of writing data to file
+    '''        
+    def __init__(self):
+        self.lock = mp.Lock()
+        self.statebuf    = mp.Array('c',256, lock=self.lock)
+        self.totalbytes  = mp.Value('i', lock=self.lock)
+        self.curbytes    = mp.Value('i', lock=self.lock)
         
-class FileDataWriter(object):
+    def setstatus(self, state=None, total=None, cur=None, curfile=None):
+        if state:
+            assert(len(state) < 256)
+            self.statebuf.value = state
+        if total:
+            self.totalbytes.value = total
+        if cur:
+            self.curbytes.value = cur
+        
+    def getstatus(self):
+        return (self.statebuf.value, self.curbytes.value, self.totalbytes.value)
+    
+    def incbytes(self, inc):
+        self.curbytes.value = self.curbytes.value + inc
+
+def get_file_hash(filename):
+    logging.debug('Hashing %s',filename)
+    
+    h = HASH_FUNCTION()
+    with open(filename, 'rb') as fid:
+        def readblock():
+            return fid.read(BLOCK_SIZE)
+        
+        for b in iter(readblock,''):
+            h.update(b)
+            if filedataglobal.status:
+                filedataglobal.status.incbytes(BLOCK_SIZE)    
+                
+    return filename, np.frombuffer(h.digest(), dtype=np.uint8, count=h.digest_size)
+
+        
+class FileDataWriter(mp.Process):
     '''
     Writes file data to a log file
     '''
 
-    def __init__(self, outfile, rootpath=None):
-        if os.path.isfile(outfile):
-            self.filename = outfile
-            self.open_file(outfile)
+    def __init__(self, outfile, rootpath=None, status=None):
+        super(FileDataWriter, self).__init__()
+        self.outfile = outfile
+        self.rootpath = rootpath
+        self.status = status
+
+    def run(self):
+        logging.debug('In run')
+        
+        if os.path.isfile(self.outfile):
+            self.filename = self.outfile
+            self.open_file(self.outfile)
         else:
-            self.init_file(outfile, rootpath)
-            
+            self.init_file(self.outfile, self.rootpath)
+        
+        self.scan()
+        self.close()
+        
     def open_file(self, filename):
         self.h5file = h5py.File(filename, 'a')
         
@@ -192,6 +261,7 @@ class FileDataWriter(object):
             isnewhash = True
             
         if isnewhash:
+            logging.debug('Writing new hash at %d',ind)
             hset[:,ind] = fd.hashval
         dateset[:,ind] = np.array(time.localtime(), dtype='int16')
         
@@ -224,6 +294,12 @@ class FileDataWriter(object):
         assert(self.rootpath is not None)
         assert(os.path.exists(self.rootpath))
         
+        logging.debug("in scan")
+        
+        if self.status:
+            self.status.setstatus(state='Initial scan')
+            
+        #walk through the directory tree
         needshash = []
         hashsize = 0
         for maindir,subdirs,files in os.walk(self.rootpath):
@@ -251,59 +327,66 @@ class FileDataWriter(object):
                         hashsize += ondisk.size
                 else:
                     self.write_data(ondisk, parentgp=gp)
-                    needshash.append(ondisk.fullpath)
-                    hashsize += ondisk.size
+                    if not ondisk.islink:
+                        needshash.append(ondisk.fullpath)
+                        hashsize += ondisk.size
                 deleted.discard(filename)
 
             for name in deleted:
                 self.make_deleted(name, gp, maindir)
         
-        return (needshash, hashsize)
-        
-    def update_hashes(self, filenames, totalsize):
-        with ProgressCLI(unit='sec', total=totalsize) as prog:
-            for name in filenames:
-                fd = FileData(name, isdir=False)
-                h = get_file_hash(name, prog)
-                fd.hashval = np.frombuffer(h.digest(), dtype=np.uint8, count=h.digest_size)
-                self.write_data(fd)
+        if self.status:
+            self.status.setstatus(state='Computing hashes',total=hashsize,cur=0)
 
-def get_file_hash(filename, progress=None):
-    h = HASH_FUNCTION()
-    with open(filename, 'rb') as fid:
-        def readblock():
-            return fid.read(BLOCK_SIZE)
+        logging.debug('Done with scan: %d files / %d bytes to hash',
+                      len(needshash),hashsize)
+                      
+        hash_pool = mp.Pool(POOL_SIZE, initializer=init_pool,initargs=(filedataglobal.status,))
+        hash_map = dict(hash_pool.imap_unordered(get_file_hash, needshash, 10))            
+        hash_pool.close()
+        #hash_map = dict([get_file_hash(filename, self.status) for filename in needshash])
         
-        for b in iter(readblock,''):
-            h.update(b)
-            if progress:
-                progress.update(len(b), info=filename)
-                
-    return h   
+        if self.status:
+            self.status.setstatus(state='Writing hashes')
+            
+        for (filename, h) in hash_map.iteritems():
+            fd = FileData(filename, hashval=h)
+            self.write_data(fd)
+
     
         
 def main():
-    testdir = '/Users/etytel01/Documents/Scanner/backfile/test/testdir1'
+    logging.basicConfig(level=logging.DEBUG)
+    
+    #testdir = '/Users/etytel01/Documents/Scanner/backfile/test/testdir1'
+    testdir = '/Users/etytel01/Documents/Dynamics'
     outfile = '/Users/etytel01/Documents/Scanner/backfile/test/newtest.h5'
-    if os.path.exists(testdir):
-        shutil.rmtree(testdir)
+    #if os.path.exists(testdir):
+    #    shutil.rmtree(testdir)
     if os.path.exists(outfile):
         os.unlink(outfile)
-        
-    ftree = build_test_directory(testdir, depth=3, filesperdir=3, minfiles=2, dirsperdir=1,
-                                  filesizes=10*1024, randomize=True) 
+    
+    
+    #ftree = build_test_directory(testdir, depth=3, filesperdir=3, minfiles=2, dirsperdir=1,
+    #                              filesizes=10*1024, randomize=True) 
 
+    status = FileDataStatus()   
+    filedataglobal.status = status
     
-    scanner = FileDataWriter(outfile, testdir)                                      
-    needshash, hashsize = scanner.scan()
-    scanner.update_hashes(needshash, hashsize)
+    scanner = FileDataWriter(outfile, testdir, status=status)
     
-    modify_dir(ftree, 3,3,3)
-    needshash, hashsize = scanner.scan()
-    scanner.update_hashes(needshash, hashsize)
+    scanner.start()
+
+    try:
+        while scanner.is_alive():
+            (state, curbytes, totalbytes) = status.getstatus()        
+            print '{0}: {1}/{2}'.format(state, curbytes, totalbytes)
+            time.sleep(0.5)
+    except KeyboardInterrupt:
+        scanner.terminate()
     
-    scanner.close()
-                                 
+    scanner.join()
+    print 'Done'
 
     
 if __name__ == '__main__':
