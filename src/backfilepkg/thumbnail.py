@@ -8,7 +8,7 @@ Created on Sat Nov 23 10:16:17 2013
 import sys, os
 import h5py
 import mimetypes, magic
-from PIL import Image
+import cv2
 import numpy as np
 
 READLENGTH = 500
@@ -27,8 +27,11 @@ class Thumbnail_Image(object):
         if path:
             self.path = path
 
-        self.im = Image.open(self.path)
-        self.im.thumbnail((IMAGESIZE,IMAGESIZE))
+        imfull = cv2.imread(self.path)
+        r = IMAGESIZE / max(imfull)
+        dim = tuple([int(a*r) for a in imfull.shape])
+        
+        self.im = cv2.resize(imfull,dim, interpolation = cv2.INTER_NEAREST)
         
     def from_hdf5(self, h5parent=None):
         if h5parent:
@@ -37,22 +40,34 @@ class Thumbnail_Image(object):
         if 'Thumbnail' in h5parent:
             h5obj = h5parent['Thumbnail']
             data = h5obj[:]
-            sz = data.shape
-            data.reshape((data.size,))
-            self.im = Image.fromstring("RGB",sz[0:2],data)
+            self.im = cv2.imdecode(data,1)
             
     def to_hdf5(self, h5parent=None):
         if h5parent:
             self.h5parent = h5parent
 
-        sz = self.im.size + (3,)           
-        data = np.fromstring(self.im.tostring(), dtype=np.uint8)
-        data = np.reshape(data,sz)
+        data = cv2.imencode('.jpg',self.im, [cv2.cv.IMWRITE_JPEG_QUALITY, 95])
         
-        h5obj = h5parent.require_dataset('Thumbnail',shape=(IMAGESIZE,IMAGESIZE,3),
-                                         dtype=np.uint8)
-        h5obj[0:sz[0],0:sz[1],:] = data
+        if 'Thumbnail' in h5parent:
+            h5obj = h5parent['Thumbnail']
+            h5obj.resize(self.im.shape)
+        else:
+            h5obj = h5parent.create_dataset('Thumbnail',shape=self.im.shape, 
+                                            maxshape=(None,),
+                                            dtype=np.uint8)
+        h5obj[:] = data
          
+
+#==============================================================================
+#class Thumbnail_Video(object):
+# vidcap.set(cv2.cv.CV_CAP_PROP_POS_AVI_RATIO,0.9)
+# Out[14]: True
+# 
+# In [15]: vid^Cp.set(cv2.cv.CV_CAP_PROP_POS_AVI_RATIO,0.9)
+# KeyboardInterrupt
+# 
+# In [15]: success, image = vidcap.read()
+#==============================================================================
         
 class Thumbnail_Text(object):
     '''

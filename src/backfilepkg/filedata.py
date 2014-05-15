@@ -11,9 +11,10 @@ import h5py
 import multiprocessing as mp
 import numpy as np
 import hashlib
-from functools import partial
 import logging
+import mimetypes, magic
 
+from thumbnail import get_thumbnail
 from filetree import RootTree
 from progress import ProgressCLI
 from test import build_test_directory, modify_dir
@@ -24,10 +25,26 @@ TIME_FORMAT = '%Y-%m-%d %H:%M:%S %Z'
 HASH_FUNCTION = hashlib.sha256
 BLOCK_SIZE = 128 * HASH_FUNCTION().block_size
 POOL_SIZE = 4
+PARALLEL = False
 
 def init_pool(status):
     filedataglobal.status = status
+
+class FileType:
+    File, Dir, Link = range(3)
     
+    @staticmethod
+    def get_name(num):
+        name = [nm1 for (nm1,num1) in FileType.__dict__.iteritems() if num1 == num]
+        if len(name) == 1:
+            return name[0]
+        else:
+            raise TypeError
+            
+    @staticmethod
+    def get_num(name):
+        return FileType.__dict__[name]
+        
 class FileData(object):
     '''
     Data on a file
@@ -37,7 +54,7 @@ class FileData(object):
     fullpath = None
     root = None
     
-    def __init__(self, fullpath, isdir=None, size=None, modified=None, hashval=None, thumbnail=None):
+    def __init__(self, fullpath, ftype=None, size=None, modified=None, hashval=None, thumbnail=None, mimetype=None):
         self.fullpath = fullpath
         
         (_,name) = os.path.split(fullpath)
@@ -46,13 +63,17 @@ class FileData(object):
         self.modified = modified
         self.hashval = hashval
         self.thumbnail = thumbnail
-        self.isdir = isdir
+        self.type = ftype
+        self.mimetp = mimetype
+        self.isthumbnail = False
         
     def __str__(self):
-        if self.isdir:
-            return '{0} (dir)'.format(self.fullpath)
+        if self.type == FileType.Dir:
+            return '{0} (dir)'.format(self.name)
+        elif self.type == FileType.Link:
+            return '{0} (link)'.format(self.name)
         else:
-            return '{0}: size = {1}; hash = {2}'.format(self.fullpath, self.size, self.hexdigest())
+            return '{0}: size = {1}; hash = {2}'.format(self.name, self.size, self.hexdigest())
 
     def hexdigest(self):
         if self.hashval is not None:
@@ -61,44 +82,43 @@ class FileData(object):
             return 'None'
 
     def __eq__(self, other):
-        if isinstance(other, FileData):
-            if self.isdir or self.islink:
-                return (other.isdir == self.isdir) and (other.islink == self.islink) and \
-                    (other.name == self.name)
-            else:
-                if self.hashval is not None and other.hashval is not None:
-                    return all(self.hashval == other.hashval)
-                else:
-                    return (self.size == other.size) and (self.modified == other.modified)            
-        else:
+        if self.type != other.type:
             return False
+        elif self.type == FileType.Dir or self.type == FileType.Link:
+            return other.name == self.name
+        else:
+            if self.hashval is not None and other.hashval is not None:
+                return all(self.hashval == other.hashval)
+            else:
+                return (other.name == self.name) and (self.size == other.size) and (self.modified == other.modified)            
     
     def __ne__(self, other):
         return not self.__eq__(other)
             
     def from_path(self):
         if os.path.isdir(self.fullpath):
-            self.isdir = True
-            self.islink = False
+            self.type = FileType.Dir
         elif os.path.islink(self.fullpath):
-            self.isdir = False
-            self.islink = True
+            self.type = FileType.Link
         else:
-            self.isdir = False
-            self.islink = False
+            self.type = FileType.File
             self.size = os.path.getsize(self.fullpath)
             self.modified = time.localtime(os.path.getmtime(self.fullpath))
+            (self.mimetp,enc) = mimetypes.guess_type(self.fullpath)
+            if not self.mimetp:
+                self.mimetp = magic.from_file(self.fullpath, mime=True)
+            
 
     def from_hdf5(self, h5gp):
-        if h5gp.attrs['IsDir']:
-            self.isdir = True
-        else:
-            self.isdir = False
+        self.type = FileType.get_num(h5gp.attrs['Type'])        
+        if self.type == FileType.File:
             if 'Size' in h5gp.attrs:
                 self.size = h5gp.attrs['Size']
             if 'Modified' in h5gp.attrs:
                 self.modified = time.struct_time(h5gp.attrs['Modified'])
-            
+            if 'MimeType' in h5gp.attrs:
+                self.mimetp = h5gp.attrs['MimeType']
+                
             #self.islink = h5gp.attrs["IsLink"]
             ## TODO: process links better here
             
@@ -108,6 +128,9 @@ class FileData(object):
             else:
                 self.hashval = None
 
+            if 'Thumbnail' in h5gp:
+                self.isthumbnail = True
+                
 class FileDataStatus(object):
     '''
     Shared object for status of writing data to file
@@ -117,7 +140,7 @@ class FileDataStatus(object):
         self.statebuf    = mp.Array('c',256, lock=self.lock)
         self.totalbytes  = mp.Value('i', lock=self.lock)
         self.curbytes    = mp.Value('i', lock=self.lock)
-        
+            
     def setstatus(self, state=None, total=None, cur=None, curfile=None):
         if state:
             assert(len(state) < 256)
@@ -148,7 +171,17 @@ def get_file_hash(filename):
                 
     return filename, np.frombuffer(h.digest(), dtype=np.uint8, count=h.digest_size)
 
-        
+def get_file_thumbnail(filename):
+    logging.debug('Thumbnail for %s',filename)
+    
+    t = get_thumbnail(path=filename)
+    if t is not None:
+        t.from_file()
+    if filedataglobal.status:
+        filedataglobal.status.incbytes(1)
+    
+    return filename, t
+    
 class FileDataWriter(mp.Process):
     '''
     Writes file data to a log file
@@ -163,21 +196,25 @@ class FileDataWriter(mp.Process):
     def run(self):
         logging.debug('In run')
         
-        if os.path.isfile(self.outfile):
-            self.filename = self.outfile
-            self.open_file(self.outfile)
-        else:
-            self.init_file(self.outfile, self.rootpath)
-        
-        self.scan()
-        self.close()
+        try:
+            if os.path.isfile(self.outfile):
+                self.filename = self.outfile
+                self.open_file(self.outfile)
+            else:
+                self.init_file(self.outfile, self.rootpath)
+            
+            self.scan()
+        finally:
+            self.close()
         
     def open_file(self, filename):
         self.h5file = h5py.File(filename, 'a')
         
         self.rootgp = self.h5file.require_group('ROOT')
+        assert((self.rootpath is None) or (self.rootpath == self.rootgp.attrs['RootPath']))
+        
         self.rootpath = self.rootgp.attrs['RootPath']
-        assert(('IsDir' in self.rootgp.attrs) and self.rootgp.attrs['IsDir'] == 1)
+        assert(self.rootgp.attrs['Type'] == FileType.get_name(FileType.Dir))
         assert(os.path.exists(self.rootpath))
         self.deletedgp = self.h5file.require_group('DELETED')
         
@@ -189,7 +226,7 @@ class FileDataWriter(mp.Process):
         
         self.rootgp = self.h5file.create_group('ROOT')
         self.rootgp.attrs['RootPath'] = self.rootpath
-        self.rootgp.attrs['IsDir'] = 1
+        self.rootgp.attrs['Type'] = FileType.get_name(FileType.Dir)
         
         self.deletedgp = self.h5file.create_group('DELETED')
         
@@ -208,21 +245,29 @@ class FileDataWriter(mp.Process):
         else:
             gp = parentgp.require_group(fd.name)
             
-        if fd.isdir:
-            if ('IsDir' in gp.attrs) and (gp.attrs['IsDir'] == 0):
+        if fd.type == FileType.Dir:
+            if gp.attrs['Type'] != FileType.get_name(FileType.Dir):
                 #it's actually a file
-                self.make_deleted(relpath)
+                self.make_deleted(fd.name, parentgp, fd.fullpath)
                 gp = self.rootgp.create_group(relpath)
-            gp.attrs['IsDir'] = 1
-        else:               
-            gp.attrs['IsDir'] = 0
-            if fd.size is not None:
-                gp.attrs['Size'] = fd.size
-            if fd.modified is not None:
-                gp.attrs["Modified"] = np.array(fd.modified, dtype='int32')
-        
-            if fd.hashval is not None:
-                self.write_hash(gp, fd)
+            if fd.type is not None:
+                gp.attrs['Type'] = FileType.get_name(fd.type)
+        else:
+            if fd.type is not None:             
+                gp.attrs['Type'] = FileType.get_name(fd.type)
+            if fd.type == FileType.Link:
+                pass
+            else:
+                if fd.size is not None:
+                    gp.attrs['Size'] = fd.size
+                if fd.modified is not None:
+                    gp.attrs["Modified"] = np.array(fd.modified, dtype='int32')
+                if fd.mimetp is not None:
+                    gp.attrs['MimeType'] = fd.mimetp
+                if fd.hashval is not None:
+                    self.write_hash(gp, fd)
+                if fd.thumbnail is not None:
+                    fd.thumbnail.to_hdf5(gp)
         
         return gp
         
@@ -265,7 +310,7 @@ class FileDataWriter(mp.Process):
             hset[:,ind] = fd.hashval
         dateset[:,ind] = np.array(time.localtime(), dtype='int16')
         
-    def make_deleted(self, name, parentgp, parentpath):
+    def make_deleted(self, name, parentgp, fullpath):
         gp = parentgp[name]
         
         if 'Hash' in gp:
@@ -281,7 +326,7 @@ class FileDataWriter(mp.Process):
                 nm = '1'
                 
             hashgp1.file.copy(gp, hashgp1, name=nm)
-            hashgp1[nm].attrs['OriginalPath'] = os.path.join(parentpath, name)
+            hashgp1[nm].attrs['OriginalPath'] = fullpath
             
             del parentgp[name]
         else:
@@ -302,14 +347,16 @@ class FileDataWriter(mp.Process):
         #walk through the directory tree
         needshash = []
         hashsize = 0
+        needsthumb = []
+        thumbsize = 0
         for maindir,subdirs,files in os.walk(self.rootpath):
-            fd = FileData(maindir, isdir=True)
+            fd = FileData(maindir, ftype=FileType.Dir)
             
             gp = self.write_data(fd)
             deleted = set(gp.keys())
 
             for subdir in subdirs:
-                subfd = FileData(os.path.join(maindir,subdir), isdir=True)
+                subfd = FileData(os.path.join(maindir,subdir), ftype=FileType.Dir)
                 self.write_data(subfd, parentgp=gp)
                 deleted.discard(subdir)
                 
@@ -322,18 +369,33 @@ class FileDataWriter(mp.Process):
                     infile.from_hdf5(gp[filename])
                     
                     if ondisk != infile:
+                        logging.debug('%s != %s',str(ondisk),str(infile))
                         self.write_data(ondisk,parentgp=gp)
-                        needshash.append(ondisk.fullpath)
-                        hashsize += ondisk.size
+                        if ondisk.type == FileType.File:
+                            needshash.append(ondisk.fullpath)
+                            hashsize += ondisk.size
+                            needsthumb.append(ondisk.fullpath)
+                            thumbsize += ondisk.size
+                    elif ondisk.type == FileType.File:
+                        #it's the same in the file as on disk, but we didn't
+                        #get a chance to calculate a hash or a thumbnail
+                        if infile.hashval is None:
+                            needshash.append(ondisk.fullpath)
+                            hashsize += ondisk.size
+                        if not infile.isthumbnail:
+                            needsthumb.append(ondisk.fullpath)
+                            thumbsize += ondisk.size
                 else:
                     self.write_data(ondisk, parentgp=gp)
-                    if not ondisk.islink:
+                    if ondisk.type == FileType.File:
                         needshash.append(ondisk.fullpath)
                         hashsize += ondisk.size
+                        needsthumb.append(ondisk.fullpath)
+                        thumbsize += ondisk.size
                 deleted.discard(filename)
 
             for name in deleted:
-                self.make_deleted(name, gp, maindir)
+                self.make_deleted(name, gp, os.path.join(maindir, name))
         
         if self.status:
             self.status.setstatus(state='Computing hashes',total=hashsize,cur=0)
@@ -341,10 +403,12 @@ class FileDataWriter(mp.Process):
         logging.debug('Done with scan: %d files / %d bytes to hash',
                       len(needshash),hashsize)
                       
-        hash_pool = mp.Pool(POOL_SIZE, initializer=init_pool,initargs=(filedataglobal.status,))
-        hash_map = dict(hash_pool.imap_unordered(get_file_hash, needshash, 10))            
-        hash_pool.close()
-        #hash_map = dict([get_file_hash(filename, self.status) for filename in needshash])
+        if PARALLEL:
+            hash_pool = mp.Pool(POOL_SIZE, initializer=init_pool,initargs=(filedataglobal.status,))
+            hash_map = dict(hash_pool.imap_unordered(get_file_hash, needshash, 10))            
+            hash_pool.close()
+        else:
+            hash_map = dict([get_file_hash(fn) for fn in needshash])
         
         if self.status:
             self.status.setstatus(state='Writing hashes')
@@ -353,39 +417,60 @@ class FileDataWriter(mp.Process):
             fd = FileData(filename, hashval=h)
             self.write_data(fd)
 
+        if self.status:
+            self.status.setstatus(state='Generating thumbnails',total=len(needsthumb),cur=0)
     
+        if PARALLEL:
+            thumb_pool = mp.Pool(POOL_SIZE, initializer=init_pool,initargs=(filedataglobal.status,))
+            thumb_map = dict(thumb_pool.imap_unordered(get_file_thumbnail, needsthumb, 10))            
+            thumb_pool.close()
+        else:
+            thumb_map = dict([get_file_thumbnail(fn) for fn in needsthumb])
+            
+        if self.status:
+            self.status.setstatus(state='Writing thumbnails')
+            
+        for (filename, t) in thumb_map.iteritems():
+            fd = FileData(filename, thumbnail=t)
+            self.write_data(fd)
         
 def main():
     logging.basicConfig(level=logging.DEBUG)
     
     #testdir = '/Users/etytel01/Documents/Scanner/backfile/test/testdir1'
-    testdir = '/Users/etytel01/Documents/Dynamics'
+    testdir = '/Users/etytel01/Documents/Scanner/backfile/test/testthumbs'
     outfile = '/Users/etytel01/Documents/Scanner/backfile/test/newtest.h5'
     #if os.path.exists(testdir):
     #    shutil.rmtree(testdir)
-    if os.path.exists(outfile):
-        os.unlink(outfile)
+    #if os.path.exists(outfile):
+    #    os.unlink(outfile)
     
     
     #ftree = build_test_directory(testdir, depth=3, filesperdir=3, minfiles=2, dirsperdir=1,
     #                              filesizes=10*1024, randomize=True) 
 
-    status = FileDataStatus()   
+    if PARALLEL:
+        status = FileDataStatus()   
+    else:
+        status = None
     filedataglobal.status = status
     
     scanner = FileDataWriter(outfile, testdir, status=status)
     
-    scanner.start()
+    if PARALLEL:
+        scanner.start()
 
-    try:
-        while scanner.is_alive():
-            (state, curbytes, totalbytes) = status.getstatus()        
-            print '{0}: {1}/{2}'.format(state, curbytes, totalbytes)
-            time.sleep(0.5)
-    except KeyboardInterrupt:
-        scanner.terminate()
-    
-    scanner.join()
+        try:
+            while scanner.is_alive():
+                (state, curbytes, totalbytes) = status.getstatus()        
+                print '{0}: {1}/{2}'.format(state, curbytes, totalbytes)
+                time.sleep(0.5)
+        except KeyboardInterrupt:
+            scanner.terminate()
+        scanner.join()
+    else:
+        scanner.run()
+        
     print 'Done'
 
     
