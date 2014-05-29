@@ -7,9 +7,11 @@ Created on Sat Nov 23 10:16:17 2013
 
 import sys, os
 import h5py
-import mimetypes, magic
+import mimetypes
+# import magic
 import cv2
 import numpy as np
+import logging
 
 READLENGTH = 500
 THUMBSIZE = 256
@@ -85,23 +87,21 @@ class Thumbnail_Video(object):
         
         success, im1 = cap.read()
         if not success:
-            self.im = None
-            return
+            logging.debug("Problem reading video: %s", self.path)
+            raise IOError, "Could not read video"
             
         cap.set(cv2.cv.CV_CAP_PROP_POS_AVI_RATIO,0.5)
         success, im2 = cap.read()
         if not success:
-            self.im = None
-            return
+            raise IOError, "Could not read video"
         
         cap.set(cv2.cv.CV_CAP_PROP_POS_AVI_RATIO,0.99)
         success, im3 = cap.read()
         if not success:
-            self.im = None
-            return
+            raise IOError, "Could not read video"
 
-        self.size = (int(cap.get(cv2.cv.CV_CAP_PROP_FRAME_WIDTH)),
-                     int(cap.get(cv2.cv.CV_CAP_PROP_FRAME_HEIGHT))
+        self.size = (int(cap.get(cv2.cv.CV_CAP_PROP_FRAME_WIDTH)), 
+                    int(cap.get(cv2.cv.CV_CAP_PROP_FRAME_HEIGHT)))
                      
         self.nframes = int(cap.get(cv2.cv.CV_CAP_PROP_FRAME_COUNT))
         self.fps = cap.get(cv2.cv.CV_CAP_PROP_FPS)
@@ -232,15 +232,16 @@ def get_thumbnail(path=None, h5obj=None):
     thumb = None
     if path:
         (mimetp,enc) = mimetypes.guess_type(path)
-        if not mimetp:
-            mimetp = magic.from_file(path, mime=True)
-        (mimebase, mimedetail) = mimetp.split('/')
+        logging.debug("get_thumbnail: %s = %s", path, mimetp)
         
-        if mimebase in thumbtypes:
-            try:
-                thumb = thumbtypes[mimebase](path=path)
-            except IOError:
-                thumb = None
+        if mimetp is not None:
+            (mimebase, mimedetail) = mimetp.split('/')
+        
+            if mimebase in thumbtypes:
+                try:
+                    thumb = thumbtypes[mimebase](path=path)
+                except IOError:
+                    thumb = None
             
     elif h5obj:
         if 'Thumbnail' in h5obj:

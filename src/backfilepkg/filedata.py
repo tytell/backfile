@@ -12,7 +12,8 @@ import multiprocessing as mp
 import numpy as np
 import hashlib
 import logging
-import mimetypes, magic
+import mimetypes
+#import magic       # problems on windows
 
 from thumbnail import get_thumbnail
 from filetree import RootTree
@@ -25,7 +26,7 @@ TIME_FORMAT = '%Y-%m-%d %H:%M:%S %Z'
 HASH_FUNCTION = hashlib.sha256
 BLOCK_SIZE = 128 * HASH_FUNCTION().block_size
 POOL_SIZE = 4
-PARALLEL = False
+PARALLEL = True
 
 def init_pool(status):
     filedataglobal.status = status
@@ -105,8 +106,6 @@ class FileData(object):
             self.size = os.path.getsize(self.fullpath)
             self.modified = time.localtime(os.path.getmtime(self.fullpath))
             (self.mimetp,enc) = mimetypes.guess_type(self.fullpath)
-            if not self.mimetp:
-                self.mimetp = magic.from_file(self.fullpath, mime=True)
             
 
     def from_hdf5(self, h5gp):
@@ -176,7 +175,10 @@ def get_file_thumbnail(filename):
     
     t = get_thumbnail(path=filename)
     if t is not None:
-        t.from_file()
+        try:
+            t.from_file()
+        except:
+            t = None
     if filedataglobal.status:
         filedataglobal.status.incbytes(1)
     
@@ -246,7 +248,7 @@ class FileDataWriter(mp.Process):
             gp = parentgp.require_group(fd.name)
             
         if fd.type == FileType.Dir:
-            if gp.attrs['Type'] != FileType.get_name(FileType.Dir):
+            if 'Type' in gp.attrs and gp.attrs['Type'] != FileType.get_name(FileType.Dir):
                 #it's actually a file
                 self.make_deleted(fd.name, parentgp, fd.fullpath)
                 gp = self.rootgp.create_group(relpath)
@@ -404,7 +406,7 @@ class FileDataWriter(mp.Process):
                       len(needshash),hashsize)
                       
         if PARALLEL:
-            hash_pool = mp.Pool(POOL_SIZE, initializer=init_pool,initargs=(filedataglobal.status,))
+            hash_pool = mp.Pool(POOL_SIZE, initializer=init_pool,initargs=(self.status,))
             hash_map = dict(hash_pool.imap_unordered(get_file_hash, needshash, 10))            
             hash_pool.close()
         else:
@@ -421,7 +423,7 @@ class FileDataWriter(mp.Process):
             self.status.setstatus(state='Generating thumbnails',total=len(needsthumb),cur=0)
     
         if PARALLEL:
-            thumb_pool = mp.Pool(POOL_SIZE, initializer=init_pool,initargs=(filedataglobal.status,))
+            thumb_pool = mp.Pool(POOL_SIZE, initializer=init_pool,initargs=(self.status,))
             thumb_map = dict(thumb_pool.imap_unordered(get_file_thumbnail, needsthumb, 10))            
             thumb_pool.close()
         else:
@@ -438,8 +440,12 @@ def main():
     logging.basicConfig(level=logging.DEBUG)
     
     #testdir = '/Users/etytel01/Documents/Scanner/backfile/test/testdir1'
-    testdir = '/Users/etytel01/Documents/Scanner/backfile/test/testthumbs'
-    outfile = '/Users/etytel01/Documents/Scanner/backfile/test/newtest.h5'
+    if os.name == 'nt':
+        testdir = "E:\\"
+        outfile =  r"C:\Users\etytel01\Documents\backfile\test\Tytell22.h5"
+    else:
+        testdir = '/Users/etytel01/Documents/Scanner/backfile/test/testthumbs'
+        outfile = '/Users/etytel01/Documents/Scanner/backfile/test/newtest.h5'
     #if os.path.exists(testdir):
     #    shutil.rmtree(testdir)
     #if os.path.exists(outfile):
